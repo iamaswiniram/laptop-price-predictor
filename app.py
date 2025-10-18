@@ -133,14 +133,18 @@ st.title("💻 Laptop Price Prediction App")
 st.markdown("Enter the laptop's specifications below to get an estimated price.")
 
 # Check if model files exist. If not, train them.
-if not os.path.exists(MODEL_PATH) or not os.path.exists(PREPROCESSOR_PATH):
-    preprocessor, model = train_and_save_artifacts()
-else:
-    # If they exist, just load them.
-    preprocessor = joblib.load(PREPROCESSOR_PATH)
-    model = joblib.load(MODEL_PATH)
+try:
+    if not os.path.exists(MODEL_PATH) or not os.path.exists(PREPROCESSOR_PATH):
+        preprocessor, model = train_and_save_artifacts()
+    else:
+        # If they exist, just load them.
+        preprocessor = joblib.load(PREPROCESSOR_PATH)
+        model = joblib.load(MODEL_PATH)
+    st.success("Model is ready!")
+except Exception as e:
+    st.error(f"An error occurred. Please try rebooting the app. Error details: {e}")
+    st.stop()
 
-st.success("Model is ready!")
 
 # --- User Input Form ---
 with st.form("prediction_form"):
