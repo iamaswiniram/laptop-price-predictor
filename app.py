@@ -248,4 +248,4 @@ else:
 
 # --- Footer ---
 st.markdown("---")
-st.markdown("Developed by a Machine
+st.markdown("Developed by Ramasamy A Batch_11 for a Machine Learning mini projects.")
