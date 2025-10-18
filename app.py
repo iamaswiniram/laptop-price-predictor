@@ -4,6 +4,7 @@ import numpy as np
 import joblib
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.preprocessing import MultiLabelBinarizer # <-- IMPORTANT: Import this
+from custom_transformers import ColumnAs2D, DataFrameMultiLabelBinarizer
 
 # =============================================================================
 # Page Configuration & Title
@@ -200,4 +201,5 @@ if model is not None:
 
 st.markdown("---")
 st.markdown("Developed by a Machine Learning enthusiast.")
+
 
