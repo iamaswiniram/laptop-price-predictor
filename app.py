@@ -1,18 +1,31 @@
 # =============================================================================
 # FILE: app.py
-# PURPOSE: The Streamlit web application for predicting laptop prices.
-# This file MUST exist in the same directory as your notebook when you save the model.
+# PURPOSE: The "Self-Healing" Streamlit App. It trains the model itself
+# if the model files are not found, guaranteeing a perfect environment match.
 # =============================================================================
 
 import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
+import os
+import warnings
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler, OneHotEncoder, MultiLabelBinarizer
+from sklearn.feature_extraction import FeatureHasher
 from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.preprocessing import MultiLabelBinarizer
+import lightgbm as lgb
+
+# --- Configuration ---
+warnings.filterwarnings('ignore')
+RANDOM_STATE = 42
+PREPROCESSOR_PATH = 'preprocessor.joblib'
+MODEL_PATH = 'lgbm_price_predictor.joblib'
 
 # =============================================================================
-# 1. DEFINE THE CUSTOM CLASSES (THE "FUTURE ADDRESS" FOR THE SAVED MODEL)
+# 1. DEFINE THE CUSTOM CLASSES AND FUNCTIONS (NEEDED FOR TRAINING & LOADING)
 # =============================================================================
 class ColumnAs2D(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None): return self
@@ -33,9 +46,6 @@ class DataFrameMultiLabelBinarizer(BaseEstimator, TransformerMixin):
         return np.hstack(all_transformed)
     def get_feature_names_out(self, input_features=None): return np.array(self.feature_names_, dtype=object)
 
-# =============================================================================
-# 2. DEFINE THE FEATURE ENGINEERING FUNCTION
-# =============================================================================
 def engineer_features(df):
     df_copy = df.copy()
     for col in ['CPU cores', 'CPU clock speed (GHz)', 'drive memory size (GB)']:
@@ -50,55 +60,120 @@ def engineer_features(df):
     df_copy['is_ssd'] = df_copy['drive type'].str.contains('ssd', case=False, na=False).astype(int)
     df_copy['is_hdd'] = df_copy['drive type'].str.contains('hdd', case=False, na=False).astype(int)
     df_copy['has_windows'] = df_copy['operating system'].apply(lambda x: 1 if any('windows' in s.lower() for s in x) else 0)
+    df_copy = df_copy.drop(columns=['RAM size', 'resolution (px)', 'screen size', 'drive type', 'operating system'], errors='ignore')
     return df_copy
 
 # =============================================================================
-# 3. LOAD ARTIFACTS AND RUN THE APP
+# 2. THE TRAINING FUNCTION
+# This function will run ONLY ONCE when the app first starts on the server.
+# =============================================================================
+@st.cache_resource(show_spinner="First-time setup: Training model, please wait...")
+def train_and_save_artifacts():
+    """
+    Loads data, trains the model, and saves the artifacts on the server.
+    This is cached, so it only runs once.
+    """
+    # --- Data Loading ---
+    train_df = pd.read_json('train_dataset.json', orient='columns')
+    val_df = pd.read_json('val_dataset.json', orient='columns')
+
+    # --- Feature Engineering & Final Data Prep ---
+    train_featured_df = engineer_features(train_df)
+    val_featured_df = engineer_features(val_df)
+    full_training_data = pd.concat([train_featured_df, val_featured_df], ignore_index=True)
+    
+    y_final_train = np.log1p(full_training_data['buynow_price'])
+    X_final_train = full_training_data.drop(columns=['buynow_price', 'log_buynow_price'], errors='ignore')
+
+    # --- Define Preprocessing Pipeline ---
+    NUMERIC_FEATURES = ['CPU cores', 'CPU clock speed (GHz)', 'drive memory size (GB)', 'RAM_size_GB', 'pixel_count', 'screen_size_inch']
+    CATEGORICAL_FEATURES_LOW = ['graphic card type', 'RAM type', 'state', 'warranty']
+    BOOLEAN_FEATURES = ['is_ssd', 'is_hdd', 'has_windows']
+    CATEGORICAL_FEATURES_HIGH = ['CPU model']
+    MULTI_LABEL_FEATURES = ['communications', 'multimedia', 'input devices']
+
+    numeric_transformer = Pipeline(steps=[('imputer', SimpleImputer(strategy='median')), ('scaler', StandardScaler())])
+    categorical_transformer_low = Pipeline(steps=[('imputer', SimpleImputer(strategy='most_frequent')), ('onehot', OneHotEncoder(handle_unknown='ignore', sparse_output=False))])
+    categorical_transformer_high = Pipeline(steps=[('to_2d', ColumnAs2D()), ('hasher', FeatureHasher(n_features=10, input_type='string'))])
+    multi_label_transformer = Pipeline(steps=[('mlb', DataFrameMultiLabelBinarizer())])
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ('num', numeric_transformer, NUMERIC_FEATURES),
+            ('cat_low', categorical_transformer_low, CATEGORICAL_FEATURES_LOW),
+            ('cat_high', categorical_transformer_high, CATEGORICAL_FEATURES_HIGH),
+            ('multi_label', multi_label_transformer, MULTI_LABEL_FEATURES),
+            ('passthrough_bool', 'passthrough', BOOLEAN_FEATURES)
+        ],
+        remainder='drop'
+    )
+
+    # --- Fit the preprocessor and transform the data ---
+    X_final_processed = preprocessor.fit_transform(X_final_train)
+
+    # --- Define and train the final model ---
+    best_hyperparameters = {
+        'n_estimators': 800, 'reg_lambda': 0.1, 'reg_alpha': 0.1, 
+        'num_leaves': 60, 'learning_rate': 0.05
+    }
+    final_model = lgb.LGBMRegressor(**best_hyperparameters, random_state=RANDOM_STATE)
+    final_model.fit(X_final_processed, y_final_train)
+
+    # --- Save the artifacts ---
+    joblib.dump(final_model, MODEL_PATH)
+    joblib.dump(preprocessor, PREPROCESSOR_PATH)
+    
+    return preprocessor, final_model
+
+# =============================================================================
+# 3. MAIN APP LOGIC
 # =============================================================================
 st.set_page_config(page_title="Laptop Price Predictor", layout="wide")
 st.title("💻 Laptop Price Prediction App")
 st.markdown("Enter the laptop's specifications below to get an estimated price.")
 
-@st.cache_resource
-def load_artifacts():
-    preprocessor = joblib.load('preprocessor.joblib')
-    model = joblib.load('lgbm_price_predictor.joblib')
-    return preprocessor, model
+# Check if model files exist. If not, train them.
+if not os.path.exists(MODEL_PATH) or not os.path.exists(PREPROCESSOR_PATH):
+    preprocessor, model = train_and_save_artifacts()
+else:
+    # If they exist, just load them.
+    preprocessor = joblib.load(PREPROCESSOR_PATH)
+    model = joblib.load(MODEL_PATH)
 
-try:
-    preprocessor, model = load_artifacts()
-    st.success("Model and preprocessor loaded successfully!")
-except Exception as e:
-    st.error(f"Error loading model artifacts. Please ensure 'preprocessor.joblib' and 'lgbm_price_predictor.joblib' are present. Error: {e}")
-    st.stop()
+st.success("Model is ready!")
 
 # --- User Input Form ---
 with st.form("prediction_form"):
-    # ... (Your full UI code goes here) ...
     st.header("Enter Laptop Specifications")
     col1, col2, col3 = st.columns(3)
+
     with col1:
-        ram_size = st.selectbox("RAM Size", ['16 gb', '8 gb', '32 gb'])
-        cpu_model = st.selectbox("CPU Model", ['Intel Core i7', 'Intel Core i5', 'AMD Ryzen 7'])
+        st.subheader("Core Components")
+        cpu_model = st.selectbox("CPU Model", ['Intel Core i7', 'Intel Core i5', 'AMD Ryzen 7', 'AMD Ryzen 5', 'Intel Core i9', 'Intel Core i3', 'AMD Ryzen 9', 'AMD Ryzen 3'])
+        cpu_cores = st.slider("CPU Cores", 2, 32, 8)
+        cpu_clock_speed = st.slider("CPU Clock Speed (GHz)", 1.0, 5.5, 2.8, 0.1)
+        ram_size = st.selectbox("RAM Size", ['16 gb', '8 gb', '32 gb', '4 gb', '64 gb', '12 gb'])
+        ram_type = st.selectbox("RAM Type", ['DDR4', 'DDR5', 'LPDDR4X', 'LPDDR5', 'DDR3'])
+
     with col2:
-        drive_memory_size = st.number_input("Drive Memory (GB)", 128, 4096, 512)
-        drive_type = st.selectbox("Drive Type", ['SSD', 'HDD', 'SSD + HDD'])
+        st.subheader("Storage & Graphics")
+        drive_type = st.selectbox("Drive Type", ['SSD', 'SSD + HDD', 'HDD'])
+        drive_memory_size = st.number_input("Drive Memory Size (GB)", min_value=128, max_value=8192, value=512, step=128)
+        graphic_card_type = st.selectbox("Graphic Card Type", ['integrated', 'dedicated'])
+        
     with col3:
-        resolution = st.selectbox("Resolution", ['1920 x 1080', '2560 x 1440'])
+        st.subheader("Display & Condition")
         screen_size = st.text_input("Screen Size (e.g., 15.6 inch)", "15.6 inch")
-    
-    # Simplified for example, add all your other inputs
-    graphic_card_type = 'integrated'
-    ram_type = 'DDR4'
-    state = 'new'
-    warranty = 'manufacturer'
-    cpu_cores = 8
-    cpu_clock_speed = 2.5
-    communications = ['Bluetooth', 'Wi-Fi']
-    multimedia = ['camera', 'speakers']
-    input_devices = ['keyboard', 'touchpad']
-    operating_system = ['Windows 11 Home']
-    
+        resolution = st.selectbox("Resolution (px)", ['1920 x 1080', '2560 x 1440', '1366 x 768', '3840 x 2160', '3072 x 1920'])
+        state = st.selectbox("Condition", ['new', 'used', 'manufacturer refurbished', 'seller refurbished'])
+        warranty = st.selectbox("Warranty", ['manufacturer', 'seller', 'no warranty'])
+
+    with st.expander("Additional Features"):
+        communications = st.multiselect("Communications", ['Bluetooth', 'Wi-Fi', 'LAN', 'NFC'], default=['Bluetooth', 'Wi-Fi'])
+        multimedia = st.multiselect("Multimedia", ['camera', 'speakers', 'microphone'], default=['camera', 'speakers', 'microphone'])
+        input_devices = st.multiselect("Input Devices", ['keyboard', 'touchpad', 'backlit keyboard', 'numeric keyboard'], default=['keyboard', 'touchpad'])
+        operating_system = st.multiselect("Operating System", ['Windows 11 Home', 'Windows 10 Pro', 'No OS', 'macOS'], default=['Windows 11 Home'])
+
     submitted = st.form_submit_button("Predict Price")
 
 if submitted:
