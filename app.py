@@ -77,10 +77,11 @@ def engineer_features(df):
     if 'CPU model' in df_copy.columns: df_copy['CPU model'] = df_copy['CPU model'].astype(str)
     for col in ['communications', 'multimedia', 'input devices', 'operating system']:
         if col in df_copy.columns: df_copy[col] = df_copy[col].apply(lambda x: x if isinstance(x, list) else [])
-    df_copy['RAM_size_GB'] = df_copy['RAM size'].str.extract('(\d+)').astype(float)
+    # Use raw regex strings to avoid SyntaxWarning
+    df_copy['RAM_size_GB'] = df_copy['RAM size'].str.extract(r'(\d+)').astype(float)
     res_split = df_copy['resolution (px)'].str.split(' x ', expand=True)
     df_copy['pixel_count'] = pd.to_numeric(res_split[0], errors='coerce') * pd.to_numeric(res_split[1], errors='coerce')
-    df_copy['screen_size_inch'] = df_copy['screen size'].str.extract('(\d+\.?\d*)').astype(float)
+    df_copy['screen_size_inch'] = df_copy['screen size'].str.extract(r'(\d+\.?\d*)').astype(float)
     df_copy['is_ssd'] = df_copy['drive type'].str.contains('ssd', case=False, na=False).astype(int)
     df_copy['is_hdd'] = df_copy['drive type'].str.contains('hdd', case=False, na=False).astype(int)
     df_copy['has_windows'] = df_copy['operating system'].apply(lambda x: 1 if any('windows' in s for s in x) else 0)
