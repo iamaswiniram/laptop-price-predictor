@@ -1,268 +1,171 @@
-import os
-import sys
-import types
+# app.py
+
 import streamlit as st
 import pandas as pd
 import numpy as np
 import joblib
 from sklearn.base import BaseEstimator, TransformerMixin
-
-# Ensure working directory
-try:
-    os.chdir(os.path.dirname(__file__))
-except Exception:
-    pass
+from sklearn.preprocessing import MultiLabelBinarizer
 
 # =============================================================================
-# Page Configuration & Styling
+# Page Configuration
 # =============================================================================
 st.set_page_config(
     page_title="Laptop Price Predictor",
     page_icon="💻",
-    layout="wide",
-    initial_sidebar_state="expanded"
+    layout="wide"
 )
-st.markdown("""
-<style>
-.reportview-container { background:#f0f2f6; }
-.sidebar .sidebar-content { background:#f0f2f6; }
-.stButton>button {
-  color:white; background-color:#4CAF50; border-radius:10px;
-  border:none; padding:10px 24px; font-size:16px; cursor:pointer;
-  transition-duration:0.4s;
-}
-.stButton>button:hover { background-color:#45a049; }
-.st-expander { border:1px solid #ddd; border-radius:10px; padding:10px; }
-</style>
-""", unsafe_allow_html=True)
 
 # =============================================================================
-# Custom Transformer Classes
+# Helper Classes & Functions (Must be defined for the preprocessor to load)
 # =============================================================================
-# These definitions MUST match the names used during training.
+# These classes and functions are copied directly from your training script.
+# They are required for joblib to correctly load the preprocessor object.
+
 class ColumnAs2D(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None): return self
-    def transform(self, X):
-        if hasattr(X, "to_numpy"):
-            return X.to_numpy().reshape(-1, 1)
-        arr = np.asarray(X)
-        return arr.reshape(-1, 1)
+    def transform(self, X): return X.to_numpy().reshape(-1, 1)
 
 class DataFrameMultiLabelBinarizer(BaseEstimator, TransformerMixin):
-    """
-    Stub to satisfy unpickling. The fitted preprocessor (loaded from disk)
-    already contains populated binarizers inside this object.
-    """
-    def __init__(self):
-        self.binarizers = {}          # populated in the unpickled object
-        self.feature_names_ = []      # populated in the unpickled object
-    def fit(self, X, y=None): return self
+    def __init__(self): self.binarizers, self.feature_names_ = {}, []
+    def fit(self, X, y=None):
+        self.feature_names_ = []
+        for col in X.columns:
+            mlb = MultiLabelBinarizer(sparse_output=False)
+            mlb.fit(X[col])
+            self.binarizers[col] = mlb
+            self.feature_names_.extend([f"{col}_{cls}" for cls in mlb.classes_])
+        return self
     def transform(self, X):
-        # Use existing binarizers (should be injected by pickle load)
-        transformed = [self.binarizers[col].transform(X[col]) for col in X.columns]
-        return np.hstack(transformed) if transformed else np.empty((len(X), 0))
-    def get_feature_names_out(self, input_features=None):
-        return np.array(self.feature_names_, dtype=object)
+        all_transformed = [self.binarizers[col].transform(X[col]) for col in X.columns]
+        return np.hstack(all_transformed)
+    def get_feature_names_out(self, input_features=None): return np.array(self.feature_names_, dtype=object)
 
-def register_training_module(module_name="custom_transformers"):
-    """
-    Create a synthetic module with the custom transformer classes if the
-    original module file is absent. This lets pickle resolve references.
-    """
-    if module_name not in sys.modules:
-        synthetic = types.ModuleType(module_name)
-        synthetic.ColumnAs2D = ColumnAs2D
-        synthetic.DataFrameMultiLabelBinarizer = DataFrameMultiLabelBinarizer
-        sys.modules[module_name] = synthetic
-
-# Try real import first; if it fails, register synthetic module.
-try:
-    import custom_transformers  # real file (preferred)
-except ModuleNotFoundError:
-    register_training_module("custom_transformers")
-
-# =============================================================================
-# Feature Engineering
-# =============================================================================
 def engineer_features(df):
     df_copy = df.copy()
     for col in ['CPU cores', 'CPU clock speed (GHz)', 'drive memory size (GB)']:
-        if col in df_copy.columns:
-            df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce')
-    if 'CPU model' in df_copy.columns:
-        df_copy['CPU model'] = df_copy['CPU model'].astype(str)
+        if col in df_copy.columns: df_copy[col] = pd.to_numeric(df_copy[col], errors='coerce')
+    if 'CPU model' in df_copy.columns: df_copy['CPU model'] = df_copy['CPU model'].astype(str)
     for col in ['communications', 'multimedia', 'input devices', 'operating system']:
-        if col in df_copy.columns:
-            df_copy[col] = df_copy[col].apply(lambda x: x if isinstance(x, list) else [])
-    if 'RAM size' in df_copy.columns:
-        df_copy['RAM_size_GB'] = df_copy['RAM size'].str.extract(r'(\d+)').astype(float)
-    if 'resolution (px)' in df_copy.columns:
-        res_split = df_copy['resolution (px)'].str.split(' x ', expand=True)
-        df_copy['pixel_count'] = (
-            pd.to_numeric(res_split[0], errors='coerce') *
-            pd.to_numeric(res_split[1], errors='coerce')
-        )
-    if 'screen size' in df_copy.columns:
-        df_copy['screen_size_inch'] = df_copy['screen size'].str.extract(r'(\d+\.?\d*)').astype(float)
-    if 'drive type' in df_copy.columns:
-        df_copy['is_ssd'] = df_copy['drive type'].str.contains('ssd', case=False, na=False).astype(int)
-        df_copy['is_hdd'] = df_copy['drive type'].str.contains('hdd', case=False, na=False).astype(int)
-    if 'operating system' in df_copy.columns:
-        df_copy['has_windows'] = df_copy['operating system'].apply(
-            lambda x: 1 if any(isinstance(s, str) and 'windows' in s.lower() for s in x) else 0
-        )
-    df_copy = df_copy.drop(
-        columns=['RAM size', 'resolution (px)', 'screen size', 'drive type', 'operating system'],
-        errors='ignore'
-    )
+        if col in df_copy.columns: df_copy[col] = df_copy[col].apply(lambda x: x if isinstance(x, list) else [])
+    df_copy['RAM_size_GB'] = df_copy['RAM size'].str.extract('(\d+)').astype(float)
+    res_split = df_copy['resolution (px)'].str.split(' x ', expand=True)
+    df_copy['pixel_count'] = pd.to_numeric(res_split[0], errors='coerce') * pd.to_numeric(res_split[1], errors='coerce')
+    df_copy['screen_size_inch'] = df_copy['screen size'].str.extract('(\d+\.?\d*)').astype(float)
+    df_copy['is_ssd'] = df_copy['drive type'].str.contains('ssd', case=False, na=False).astype(int)
+    df_copy['is_hdd'] = df_copy['drive type'].str.contains('hdd', case=False, na=False).astype(int)
+    df_copy['has_windows'] = df_copy['operating system'].apply(lambda x: 1 if any('windows' in s.lower() for s in x) else 0)
+    # The drop columns are not needed here as we build the input from scratch
     return df_copy
 
 # =============================================================================
-# Load Model / Preprocessor
+# Load Model and Preprocessor
 # =============================================================================
+# Use st.cache_resource to load these only once
 @st.cache_resource
-def load_model():
-    # Ensure synthetic module registered (covers late import cases)
-    register_training_module("custom_transformers")
-
+def load_artifacts():
+    """
+    Loads the saved model and preprocessor from disk.
+    Caches the result to avoid reloading on every interaction.
+    """
     try:
         model = joblib.load('lgbm_price_predictor.joblib')
-    except FileNotFoundError:
-        st.error("Missing lgbm_price_predictor.joblib.")
-        return None, None
-    except Exception as e:
-        st.error(f"Error loading model: {e}")
-        return None, None
-
-    try:
         preprocessor = joblib.load('preprocessor.joblib')
+        return model, preprocessor
     except FileNotFoundError:
-        st.error("Missing preprocessor.joblib.")
+        st.error("Model or preprocessor files not found. Make sure 'lgbm_price_predictor.joblib' and 'preprocessor.joblib' are in the same directory as app.py.")
         return None, None
-    except AttributeError:
-        st.error("Unpickling failed: custom transformer module name mismatch. "
-                 "If training used a different module (e.g. my_pkg.custom_transformers), "
-                 "rename/create that module file with the class definitions.")
-        return model, None
-    except Exception as e:
-        st.error(f"Error loading preprocessor: {e}")
-        return model, None
 
-    return model, preprocessor
-
-model, preprocessor = load_model()
+model, preprocessor = load_artifacts()
 
 # =============================================================================
-# UI
+# Main App Interface
 # =============================================================================
-col1, col2 = st.columns([1, 3])
-with col1:
-    try:
-        st.image("laptop_image.jpg", width=250)
-    except Exception:
-        st.write("Image not found.")
-with col2:
-    st.title("Laptop Price Predictor")
-    st.markdown("Enter the specifications of a laptop to estimate its price.")
-st.markdown("---")
+st.title("💻 Laptop Price Prediction App")
+st.markdown("""
+This application uses a LightGBM machine learning model to predict the price of a laptop.
+Enter the laptop's specifications in the sidebar to get an estimated price.
+""")
 
-# =============================================================================
-# Form & Prediction
-# =============================================================================
-if model is not None and preprocessor is not None:
-    with st.form("prediction_form"):
-        st.header("Enter Laptop Specifications")
-        col_a, col_b, col_c = st.columns(3)
+st.sidebar.header("Enter Laptop Specifications")
 
-        with col_a:
-            st.subheader("Core Components")
-            cpu_model = st.selectbox("CPU Model", [
-                'intel core i7', 'intel core i5', 'amd ryzen 7', 'amd ryzen 5',
-                'intel core i9', 'intel core i3', 'amd ryzen 9', 'amd ryzen 3'
-            ])
-            cpu_cores = st.slider("CPU Cores", 2, 16, 4)
-            cpu_clock_speed = st.slider("CPU Clock Speed (GHz)", 1.0, 5.0, 2.5, 0.1)
-            ram_size = st.selectbox("RAM Size", ['8 gb', '16 gb', '32 gb', '4 gb', '64 gb', '12 gb'])
-            ram_type = st.selectbox("RAM Type", ['ddr4', 'ddr5', 'ddr3'])
+# --- Create Input Widgets in the Sidebar ---
+def user_input_features():
+    # Numerical Inputs
+    cpu_cores = st.sidebar.number_input('CPU Cores', min_value=1, max_value=32, value=8, step=1)
+    cpu_clock = st.sidebar.number_input('CPU Clock Speed (GHz)', min_value=0.5, max_value=6.0, value=2.5, step=0.1)
+    drive_memory = st.sidebar.number_input('Drive Memory Size (GB)', min_value=64, max_value=4096, value=512, step=64)
+    
+    # Text inputs that get parsed
+    ram_size = st.sidebar.text_input("RAM Size (e.g., '16 gb')", value='16 gb')
+    resolution = st.sidebar.text_input("Screen Resolution (e.g., '1920 x 1080')", value='1920 x 1080')
+    screen_size = st.sidebar.text_input("Screen Size (e.g., '15.6 inch')", value='15.6 inch')
+    drive_type = st.sidebar.text_input("Drive Type (e.g., 'SSD', 'HDD + SSD')", value='SSD')
+    cpu_model = st.sidebar.text_input("CPU Model (e.g., 'Intel Core i7')", value='Intel Core i7')
 
-        with col_b:
-            st.subheader("Storage & Graphics")
-            drive_type = st.selectbox("Drive Type", ['ssd', 'ssd + hdd', 'hdd'])
-            drive_memory_size = st.number_input("Drive Memory Size (GB)", min_value=128, max_value=4096, value=512, step=128)
-            graphic_card_type = st.selectbox("Graphic Card Type", ['integrated graphics', 'dedicated graphics'])
+    # Low-cardinality categorical inputs
+    graphic_card_type = st.sidebar.selectbox('Graphic Card Type', ['integrated', 'dedicated'])
+    ram_type = st.sidebar.selectbox('RAM Type', ['DDR4', 'DDR5', 'LPDDR4X', 'LPDDR5'])
+    state = st.sidebar.selectbox('Condition', ['new', 'used', 'manufacturer refurbished', 'seller refurbished'])
+    warranty = st.sidebar.selectbox('Warranty', ['manufacturer', 'seller'])
 
-        with col_c:
-            st.subheader("Display & Condition")
-            screen_size = st.selectbox("Screen Size", [
-                '15" - 15.9"', '14" - 14.9"', '13" - 13.9"', '16" - 16.9"', '17" or more'
-            ])
-            resolution = st.selectbox("Resolution (px)", [
-                '1920 x 1080', '2560 x 1440', '1366 x 768', '3840 x 2160'
-            ])
-            state = st.selectbox("Condition", ['new', 'used', 'refurbished', 'after-exhibition'])
+    # Multi-label inputs
+    communications = st.sidebar.multiselect('Communications', ['Bluetooth', 'Wi-Fi', 'LAN'], default=['Bluetooth', 'Wi-Fi'])
+    multimedia = st.sidebar.multiselect('Multimedia', ['camera', 'speakers', 'microphone'], default=['camera', 'speakers', 'microphone'])
+    input_devices = st.sidebar.multiselect('Input Devices', ['keyboard', 'touchpad', 'backlit keyboard'], default=['keyboard', 'touchpad'])
+    operating_system = st.sidebar.multiselect('Operating System', ['Windows 11 Home', 'Windows 10 Pro', 'No OS', 'macOS'], default=['Windows 11 Home'])
 
-        with st.expander("Additional Features"):
-            communications = st.multiselect("Communications", [
-                'bluetooth', 'wifi', 'lan 10/100/1000 mbps', 'nfc'
-            ], default=['bluetooth', 'wifi'])
-            multimedia = st.multiselect("Multimedia", ['camera', 'speakers', 'microphone'],
-                                        default=['camera', 'speakers', 'microphone'])
-            input_devices = st.multiselect("Input Devices", [
-                'keyboard', 'touchpad', 'numeric keyboard', 'illuminated keyboard'
-            ], default=['keyboard', 'touchpad'])
-            operating_system = st.multiselect("Operating System", [
-                'windows 11 home', 'windows 10 home', 'no system', 'macos'
-            ], default=['windows 11 home'])
-            warranty = st.selectbox("Warranty", ['producer warranty', 'seller warranty', 'no warranty'])
+    # Create a dictionary from the inputs
+    data = {
+        'CPU cores': cpu_cores,
+        'CPU clock speed (GHz)': cpu_clock,
+        'drive memory size (GB)': drive_memory,
+        'RAM size': ram_size,
+        'resolution (px)': resolution,
+        'screen size': screen_size,
+        'drive type': drive_type,
+        'CPU model': cpu_model,
+        'graphic card type': graphic_card_type,
+        'RAM type': ram_type,
+        'state': state,
+        'warranty': warranty,
+        'communications': [communications], # Must be in a list for DataFrame creation
+        'multimedia': [multimedia],
+        'input devices': [input_devices],
+        'operating system': [operating_system]
+    }
+    
+    # Convert to a single-row DataFrame
+    features = pd.DataFrame(data)
+    return features
 
-        st.markdown("---")
-        submitted = st.form_submit_button("Predict Price")
+input_df = user_input_features()
 
-    if submitted:
-        row = {
-            'graphic card type': graphic_card_type,
-            'communications': communications,
-            'resolution (px)': resolution,
-            'CPU cores': cpu_cores,
-            'RAM size': ram_size,
-            'operating system': operating_system,
-            'drive type': drive_type,
-            'input devices': input_devices,
-            'multimedia': multimedia,
-            'RAM type': ram_type,
-            'CPU clock speed (GHz)': cpu_clock_speed,
-            'CPU model': cpu_model,
-            'state': state,
-            'drive memory size (GB)': drive_memory_size,
-            'warranty': warranty,
-            'screen size': screen_size
-        }
-        df_input = pd.DataFrame([row])
+# Display the user's input
+st.subheader("Your Laptop's Specifications")
+st.dataframe(input_df.T.rename(columns={0: 'Value'}))
 
-        with st.spinner("Predicting..."):
-            try:
-                feat_df = engineer_features(df_input)
-                X_proc = preprocessor.transform(feat_df)
-                log_pred = model.predict(X_proc)[0]
-                price = np.expm1(log_pred)
-            except Exception as e:
-                st.error(f"Prediction failed: {e}")
-                st.stop()
+# Prediction button
+if st.button('Predict Price', type="primary"):
+    if model is not None and preprocessor is not None:
+        with st.spinner('Analyzing specifications and predicting price...'):
+            # 1. Apply feature engineering
+            engineered_df = engineer_features(input_df)
+            
+            # 2. Apply the preprocessor
+            # Ensure the columns are in the same order as during training
+            # The preprocessor will select the correct ones
+            processed_input = preprocessor.transform(engineered_df)
+            
+            # 3. Make a prediction (output is log-transformed)
+            log_prediction = model.predict(processed_input)
+            
+            # 4. Inverse transform the prediction to get the actual price
+            predicted_price = np.expm1(log_prediction)[0]
 
+        # Display the result
         st.success("Prediction Complete!")
-        st.markdown(f"""
-        <div style="border:2px solid #4CAF50; border-radius:10px; padding:20px; text-align:center;">
-            <h2 style="color:#2E8B57;">Estimated Laptop Price</h2>
-            <h1 style="color:#4CAF50; font-size:3em;">${price:,.2f}</h1>
-        </div>
-        """, unsafe_allow_html=True)
-elif model is not None and preprocessor is None:
-    st.error("Preprocessor failed to load (module name mismatch). Create a real custom_transformers.py used during training or retrain artifacts.")
-else:
-    st.warning("Model not loaded. Verify joblib files exist in the working directory.")
-
-# =============================================================================
-# Footer
-# =============================================================================
-st.markdown("---")
-st.markdown("Developed by a Machine Learning enthusiast.")
+        st.metric(label="Predicted Laptop Price", value=f"${predicted_price:,.2f}")
+        st.balloons()
+    else:
+        st.error("Model is not loaded. Cannot make a prediction.")
