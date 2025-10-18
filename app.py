@@ -4,16 +4,14 @@ import pandas as pd
 import numpy as np
 import joblib
 from sklearn.base import BaseEstimator, TransformerMixin
+import sys, types
 
-# Ensure working directory (helps on some deployment platforms)
+# Ensure working directory
 try:
     os.chdir(os.path.dirname(__file__))
 except Exception:
     pass
 
-# =============================================================================
-# Page Configuration & Title
-# =============================================================================
 st.set_page_config(
     page_title="Laptop Price Predictor",
     page_icon="💻",
@@ -21,7 +19,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# --- Custom CSS for Rich UI ---
 st.markdown("""
 <style>
     .reportview-container { background: #f0f2f6; }
@@ -41,39 +38,42 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# =============================================================================
-# Helper Classes (must match training-time fully qualified names)
-# =============================================================================
-# If during training these classes lived in another module (e.g. custom_transformers.py),
-# rename this file or create that module with identical class names.
+# -------------------------------------------------------------------------
+# Custom transformer stubs (names must match training-time module + class)
+# -------------------------------------------------------------------------
 class ColumnAs2D(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None): return self
     def transform(self, X): return X.to_numpy().reshape(-1, 1)
 
 class DataFrameMultiLabelBinarizer(BaseEstimator, TransformerMixin):
-    """
-    Minimal implementation to allow unpickling.
-    The fitted instance (inside the saved preprocessor) already contains binarizers.
-    """
     def __init__(self):
         self.binarizers = {}
         self.feature_names_ = []
-
-    def fit(self, X, y=None):
-        # No refitting logic needed for inference.
-        return self
-
+    def fit(self, X, y=None): return self
     def transform(self, X):
-        # Expect self.binarizers populated in the unpickled object.
         all_transformed = [self.binarizers[col].transform(X[col]) for col in X.columns]
         return np.hstack(all_transformed)
-
     def get_feature_names_out(self, input_features=None):
         return np.array(self.feature_names_, dtype=object)
 
-# =============================================================================
-# Feature Engineering
-# =============================================================================
+def _inject_stub_classes():
+    # Add stubs under possible module names used during training
+    for mod_name in [
+        'custom_transformers',
+        'transformers',
+        'preprocessing',
+        '__main__',
+        'ml_utils'
+    ]:
+        if mod_name not in sys.modules:
+            m = types.ModuleType(mod_name)
+            m.ColumnAs2D = ColumnAs2D
+            m.DataFrameMultiLabelBinarizer = DataFrameMultiLabelBinarizer
+            sys.modules[mod_name] = m
+
+# -------------------------------------------------------------------------
+# Feature engineering
+# -------------------------------------------------------------------------
 def engineer_features(df):
     df_copy = df.copy()
     for col in ['CPU cores', 'CPU clock speed (GHz)', 'drive memory size (GB)']:
@@ -84,7 +84,6 @@ def engineer_features(df):
     for col in ['communications', 'multimedia', 'input devices', 'operating system']:
         if col in df_copy.columns:
             df_copy[col] = df_copy[col].apply(lambda x: x if isinstance(x, list) else [])
-    # Regex patterns as raw strings
     if 'RAM size' in df_copy.columns:
         df_copy['RAM_size_GB'] = df_copy['RAM size'].str.extract(r'(\d+)').astype(float)
     if 'resolution (px)' in df_copy.columns:
@@ -108,11 +107,12 @@ def engineer_features(df):
     )
     return df_copy
 
-# =============================================================================
-# Load Model and Preprocessor
-# =============================================================================
+# -------------------------------------------------------------------------
+# Load model and preprocessor
+# -------------------------------------------------------------------------
 @st.cache_resource
 def load_model():
+    _inject_stub_classes()  # Inject before unpickling
     try:
         model = joblib.load('lgbm_price_predictor.joblib')
     except FileNotFoundError:
@@ -121,26 +121,24 @@ def load_model():
     except Exception as e:
         st.error(f"Error loading model: {e}")
         return None, None
-
     try:
         preprocessor = joblib.load('preprocessor.joblib')
     except FileNotFoundError:
         st.error("Missing preprocessor.joblib.")
         return None, None
-    except AttributeError as e:
-        st.error("Unpickling error (custom class mismatch). Ensure class/module names match training.")
+    except AttributeError:
+        st.error("Custom class/module mismatch. Confirm original training module name.")
         return None, None
     except Exception as e:
         st.error(f"Error loading preprocessor: {e}")
         return None, None
-
     return model, preprocessor
 
 model, preprocessor = load_model()
 
-# =============================================================================
-# Application UI
-# =============================================================================
+# -------------------------------------------------------------------------
+# UI
+# -------------------------------------------------------------------------
 col1, col2 = st.columns([1, 3])
 with col1:
     try:
@@ -153,11 +151,9 @@ with col2:
 
 st.markdown("---")
 
-# --- Input Form ---
 if model is not None and preprocessor is not None:
     with st.form("prediction_form"):
         st.header("Enter Laptop Specifications")
-
         col_a, col_b, col_c = st.columns(3)
 
         with col_a:
@@ -223,7 +219,6 @@ if model is not None and preprocessor is not None:
             'warranty': warranty,
             'screen size': screen_size
         }
-
         input_df = pd.DataFrame([input_data])
 
         with st.spinner('Analyzing specifications and predicting price...'):
@@ -246,6 +241,5 @@ if model is not None and preprocessor is not None:
 else:
     st.warning("Model not loaded. Fix earlier errors before using the form.")
 
-# --- Footer ---
 st.markdown("---")
-st.markdown("Developed by Ramasamy A Batch_11 for a Machine Learning mini projects.")
+st.markdown("Developed by Ramasamy A Batch_11 for a Machine Learning mini project.")
