@@ -4,7 +4,7 @@ import pandas as pd
 import numpy as np
 import joblib
 from sklearn.base import BaseEstimator, TransformerMixin
-import sys, types
+import sys, types, re
 
 # Ensure working directory
 try:
@@ -38,9 +38,9 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-# -------------------------------------------------------------------------
-# Custom transformer stubs (names must match training-time module + class)
-# -------------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Custom transformer stubs (simplified) – replace with true implementations if you retrain
+# ---------------------------------------------------------------------
 class ColumnAs2D(BaseEstimator, TransformerMixin):
     def fit(self, X, y=None): return self
     def transform(self, X): return X.to_numpy().reshape(-1, 1)
@@ -51,19 +51,20 @@ class DataFrameMultiLabelBinarizer(BaseEstimator, TransformerMixin):
         self.feature_names_ = []
     def fit(self, X, y=None): return self
     def transform(self, X):
+        # Will fail later if expected binarizers missing – indicates stub vs real mismatch
         all_transformed = [self.binarizers[col].transform(X[col]) for col in X.columns]
         return np.hstack(all_transformed)
     def get_feature_names_out(self, input_features=None):
         return np.array(self.feature_names_, dtype=object)
 
 def _inject_stub_classes():
-    # Add stubs under possible module names used during training
+    # Add stubs under possible training module names
     for mod_name in [
         'custom_transformers',
         'transformers',
         'preprocessing',
-        '__main__',
-        'ml_utils'
+        'ml_utils',
+        '__main__'
     ]:
         if mod_name not in sys.modules:
             m = types.ModuleType(mod_name)
@@ -71,9 +72,26 @@ def _inject_stub_classes():
             m.DataFrameMultiLabelBinarizer = DataFrameMultiLabelBinarizer
             sys.modules[mod_name] = m
 
-# -------------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Debug helper: scan pickle file bytes to display probable module paths
+# ---------------------------------------------------------------------
+def scan_pickle_modules(path):
+    try:
+        raw = open(path, 'rb').read()
+    except Exception:
+        return []
+    # Heuristic: look for patterns like b'module.name\nClassName'
+    candidates = set()
+    for cls in [b'ColumnAs2D', b'DataFrameMultiLabelBinarizer']:
+        # module name often precedes class with newline
+        pattern = rb'([a-zA-Z_][\w\.]*)\n' + cls
+        for m in re.finditer(pattern, raw):
+            candidates.add(m.group(1).decode('utf-8'))
+    return sorted(candidates)
+
+# ---------------------------------------------------------------------
 # Feature engineering
-# -------------------------------------------------------------------------
+# ---------------------------------------------------------------------
 def engineer_features(df):
     df_copy = df.copy()
     for col in ['CPU cores', 'CPU clock speed (GHz)', 'drive memory size (GB)']:
@@ -107,12 +125,25 @@ def engineer_features(df):
     )
     return df_copy
 
-# -------------------------------------------------------------------------
-# Load model and preprocessor
-# -------------------------------------------------------------------------
+# ---------------------------------------------------------------------
+# Load model & preprocessor
+# ---------------------------------------------------------------------
 @st.cache_resource
 def load_model():
-    _inject_stub_classes()  # Inject before unpickling
+    _inject_stub_classes()
+    model = None
+    preprocessor = None
+
+    # Show probable module names in sidebar for user guidance
+    with st.sidebar:
+        mods = scan_pickle_modules('preprocessor.joblib')
+        if mods:
+            st.caption("Detected module name candidates for custom classes:")
+            for m in mods:
+                st.code(m)
+        else:
+            st.caption("No module name candidates found via byte scan.")
+
     try:
         model = joblib.load('lgbm_price_predictor.joblib')
     except FileNotFoundError:
@@ -121,24 +152,26 @@ def load_model():
     except Exception as e:
         st.error(f"Error loading model: {e}")
         return None, None
+
     try:
         preprocessor = joblib.load('preprocessor.joblib')
     except FileNotFoundError:
         st.error("Missing preprocessor.joblib.")
         return None, None
-    except AttributeError:
-        st.error("Custom class/module mismatch. Confirm original training module name.")
-        return None, None
+    except AttributeError as e:
+        st.error("Custom class/module mismatch. Retrain OR create the original module file with real class code.")
+        return model, None
     except Exception as e:
         st.error(f"Error loading preprocessor: {e}")
-        return None, None
+        return model, None
+
     return model, preprocessor
 
 model, preprocessor = load_model()
 
-# -------------------------------------------------------------------------
+# ---------------------------------------------------------------------
 # UI
-# -------------------------------------------------------------------------
+# ---------------------------------------------------------------------
 col1, col2 = st.columns([1, 3])
 with col1:
     try:
@@ -238,8 +271,10 @@ if model is not None and preprocessor is not None:
             <h1 style="color: #4CAF50; font-size: 3em;">${final_price:,.2f}</h1>
         </div>
         """, unsafe_allow_html=True)
+elif model is not None and preprocessor is None:
+    st.error("Preprocessor failed to load. See sidebar for module hints. Option: retrain with classes in a module (e.g. custom_transformers.py).")
 else:
     st.warning("Model not loaded. Fix earlier errors before using the form.")
 
 st.markdown("---")
-st.markdown("Developed by Ramasamy A Batch_11 for a Machine Learning mini project.")
+st.markdown("Developed by a Machine Learning enthusiast.")
