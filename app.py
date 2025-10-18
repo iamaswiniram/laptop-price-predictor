@@ -1,35 +1,3 @@
-Of course! You've built a very nice-looking UI. The error you're encountering is a very common and tricky one that happens when deploying scikit-learn pipelines with custom transformers.
-
-Let's break it down and fix it.
-
-The Core Problem
-The error is in your custom DataFrameMultiLabelBinarizer class, specifically in the fit method:
-
-# --- This is the incorrect part ---
-class DataFrameMultiLabelBinarizer(BaseEstimator, TransformerMixin):
-    def fit(self, X, y=None):
-        # ...
-        for col in X.columns:
-            # This line tries to load the preprocessor from disk
-            # from within a class that is PART of the preprocessor.
-            # This creates a circular and incorrect logic.
-            mlb = joblib.load('preprocessor.joblib').named_transformers_['multi_label'].named_steps['mlb'].binarizers[col]
-            self.binarizers[col] = mlb
-            # ...
-        return self
-Why this is wrong:
-
-The fit method is for training. When you run your Streamlit app, you are not fitting or training anything. You are only transforming new data.
-joblib.load restores the entire object. When you call preprocessor = joblib.load('preprocessor.joblib'), it loads the entire preprocessor object, including the already-fitted DataFrameMultiLabelBinarizer with its binarizers dictionary already populated.
-The class definition is just a blueprint. The reason you need to include the custom class in your app.py is so that when joblib tries to un-pickle the preprocessor, it knows what a DataFrameMultiLabelBinarizer object is. It doesn't need to re-fit it.
-The Fix
-We need to replace your custom class with the original version from your training script. The fit method should define how to learn from data, and the transform method should define how to apply that learning. The Streamlit app will only ever use the transform method of the loaded object.
-
-I also spotted one other small potential bug in engineer_features that I'll fix to make your app more robust.
-
-Corrected app.py Code
-Here is the complete, corrected code. I have marked the changed sections with comments.
-
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -232,3 +200,4 @@ if model is not None:
 
 st.markdown("---")
 st.markdown("Developed by a Machine Learning enthusiast.")
+
