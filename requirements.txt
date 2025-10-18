@@ -1,10 +1,9 @@
-# This file forces Streamlit to install the EXACT versions of the libraries
-# that you used for training, which solves the version mismatch errors.
 pandas==2.0.3
 numpy==1.25.2
 scikit-learn==1.3.0
 lightgbm==4.1.0
 joblib
 streamlit
+
 
 
